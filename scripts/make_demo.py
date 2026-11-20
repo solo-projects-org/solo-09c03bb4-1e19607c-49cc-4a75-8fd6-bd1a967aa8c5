@@ -4,6 +4,8 @@ Output layout (under --out, default ./demo_data):
   round1/samples.csv, round1/replicates.parquet
   round2/samples.csv, round2/replicates.parquet
   mismatch/round2_replicates.parquet   (different rep ids -> blank interval)
+  weight_job/round1_samples.csv, round2_samples.csv, crosswalk.csv
+      (inputs for POST /api/weight-jobs; districts A/B, areas a1/a2/b1)
 """
 from __future__ import annotations
 
@@ -62,6 +64,32 @@ def main() -> None:
         ("t1", "rep1", 5.0), ("t2", "rep1", 5.0), ("t3", "rep1", 5.0),
         ("t1", "rep3", 6.0), ("t2", "rep3", 4.0), ("t3", "rep3", 5.0),
     ])
+
+    # Weight-generation job inputs: original-format sample CSVs plus a
+    # crosswalk. District A holds areas a1/a2 (two samples each), district B
+    # a single area b1; the area sets match across both rounds.
+    wj = root / "weight_job"
+    write_csv(wj / "round1_samples.csv", [
+        ("s1", "A", 1, 4.0), ("s2", "A", 0, 6.0),
+        ("s3", "A", 1, 3.0), ("s4", "A", 0, 5.0),
+        ("s5", "B", 1, 2.0), ("s6", "B", 1, 8.0),
+    ])
+    write_csv(wj / "round2_samples.csv", [
+        ("t1", "A", 1, 9.0), ("t2", "A", 1, 1.0),
+        ("t3", "A", 0, 2.0), ("t4", "A", 1, 7.0),
+        ("t5", "B", 0, 5.0), ("t6", "B", 1, 5.0),
+    ])
+    xw = wj / "crosswalk.csv"
+    xw.parent.mkdir(parents=True, exist_ok=True)
+    with open(xw, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["round", "sample_id", "area_id"])
+        w.writerows([
+            (1, "s1", "a1"), (1, "s2", "a1"), (1, "s3", "a2"), (1, "s4", "a2"),
+            (1, "s5", "b1"), (1, "s6", "b1"),
+            (2, "t1", "a1"), (2, "t2", "a1"), (2, "t3", "a2"), (2, "t4", "a2"),
+            (2, "t5", "b1"), (2, "t6", "b1"),
+        ])
     print(f"demo data written under {root}")
 
 

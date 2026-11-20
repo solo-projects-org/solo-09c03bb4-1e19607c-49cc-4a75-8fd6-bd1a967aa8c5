@@ -56,7 +56,25 @@
   </div>
 </div>
 
-<div class="card">
+<div class="card" style="margin-top:16px">
+  <h2>配对重抽权重生成</h2>
+  <div class="sub" style="margin-bottom:12px">
+    上传两轮原格式样本 CSV 与对照 CSV（列：<code>round, sample_id, area_id</code>），
+    各区独立有放回重抽同样多的片区，两轮共用片区抽中次数；未抽中片区写零权重。
+    成功后得到一个 ZIP，解压后可分别从上方入口导入两轮。校验或生成失败不会影响已发布数据。
+  </div>
+  <table style="margin-bottom:10px"><tbody>
+    <tr><td style="width:200px">第一轮样本 CSV</td><td><input type="file" id="w-r1" accept=".csv"></td></tr>
+    <tr><td>第二轮样本 CSV</td><td><input type="file" id="w-r2" accept=".csv"></td></tr>
+    <tr><td>对照 CSV（round, sample_id, area_id）</td><td><input type="file" id="w-xw" accept=".csv"></td></tr>
+    <tr><td>重抽次数</td><td><input type="number" id="w-reps" min="1" max="999999" value="500" style="padding:8px;font-size:14px;border:1px solid var(--bd);border-radius:6px"></td></tr>
+    <tr><td>随机种子（整数）</td><td><input type="number" id="w-seed" value="20261120" style="padding:8px;font-size:14px;border:1px solid var(--bd);border-radius:6px"></td></tr>
+  </tbody></table>
+  <button onclick="generateWeights()" id="w-btn">生成并打包 ZIP</button>
+  <div class="msg" id="w-msg"></div>
+</div>
+
+<div class="card" style="margin-top:16px">
   <h2>已发布数据</h2>
   <table id="status-table"><thead>
     <tr><th>轮次</th><th>状态</th><th>代际</th><th>样本数</th><th>重抽次数</th><th>重抽权重行数</th><th>发布时间</th></tr>
@@ -100,6 +118,44 @@ async function upload(round) {
     msg.className = "msg err"; msg.textContent = "校验失败（旧数据仍可查询）：" + e.message;
   } finally {
     btn.disabled = false; refresh();
+  }
+}
+
+async function generateWeights() {
+  const f1 = document.getElementById("w-r1").files[0];
+  const f2 = document.getElementById("w-r2").files[0];
+  const fx = document.getElementById("w-xw").files[0];
+  const reps = document.getElementById("w-reps").value;
+  const seed = document.getElementById("w-seed").value;
+  const msg = document.getElementById("w-msg");
+  const btn = document.getElementById("w-btn");
+  msg.className = "msg"; msg.textContent = "";
+  if (!f1 || !f2 || !fx) { msg.className = "msg err"; msg.textContent = "请同时选择第一轮、第二轮样本 CSV 和对照 CSV"; return; }
+  if (!reps || !seed) { msg.className = "msg err"; msg.textContent = "请填写重抽次数和随机种子"; return; }
+  const fd = new FormData();
+  fd.append("round1_sample_csv", f1);
+  fd.append("round2_sample_csv", f2);
+  fd.append("crosswalk_csv", fx);
+  fd.append("n_replicates", reps);
+  fd.append("seed", seed);
+  btn.disabled = true; msg.textContent = "校验、抽样与打包中（大表可能需要数分钟）…";
+  try {
+    const resp = await fetch("/api/weight-jobs", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "生成失败");
+    msg.className = "msg ok";
+    msg.textContent =
+      `生成成功（任务 ${data.job_id.slice(0, 12)}…）：` +
+      `第1轮 ${fmtInt(data.round1.n_samples)} 样本 / ${fmtInt(data.round1.n_rep_rows)} 权重行，` +
+      `第2轮 ${fmtInt(data.round2.n_samples)} 样本 / ${fmtInt(data.round2.n_rep_rows)} 权重行，` +
+      `区 ${data.districts.length} 个。下载已开始…`;
+    const a = document.createElement("a");
+    a.href = data.download_url; a.download = "paired_replicate_weights.zip";
+    document.body.appendChild(a); a.click(); a.remove();
+  } catch (e) {
+    msg.className = "msg err"; msg.textContent = "校验或生成失败（现行数据照常可查）：" + e.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 

@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import analysis, db, ingest
+from . import analysis, db, ingest, weights
 
 UPLOAD_ROOT = Path(os.environ.get("UPLOAD_TMP_DIR", str(db.TMP_DIR)))
 
@@ -82,6 +83,82 @@ def upload_round(
         ingest.remove_upload_dir(upload_dir)
 
     return JSONResponse({"ok": True, **result})
+
+
+def _require_csv(upload: UploadFile, label: str) -> None:
+    if not (upload.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=422, detail=f"{label}必须是 .csv")
+
+
+@app.post("/api/weight-jobs")
+def create_weight_job(
+    round1_sample_csv: UploadFile = File(...),
+    round2_sample_csv: UploadFile = File(...),
+    crosswalk_csv: UploadFile = File(...),
+    n_replicates: str | None = Form(None),
+    seed: str | None = Form(None),
+) -> JSONResponse:
+    """Validate the three CSVs, draw paired replicates, build one ZIP.
+
+    Runs in Starlette's worker thread; uploads stream to disk first and the
+    scratch DuckDB lives on the data volume, so the service memory cap is
+    unaffected by input size.  A failure here never touches the published
+    survey database, so current data stays queryable.
+    """
+    _require_csv(round1_sample_csv, "第一轮样本文件")
+    _require_csv(round2_sample_csv, "第二轮样本文件")
+    _require_csv(crosswalk_csv, "对照文件")
+
+    try:
+        n_reps = weights.parse_positive_int(
+            n_replicates, "重抽次数", weights.MAX_REPLICATES
+        )
+        seed_value = weights.parse_seed(seed)
+    except weights.WeightGenerationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    upload_dir = tempfile.mkdtemp(prefix="wjob_in_", dir=str(UPLOAD_ROOT))
+    job = weights.create_job_dir()
+    try:
+        csv1 = ingest.save_upload(upload_dir, round1_sample_csv.filename, round1_sample_csv.file)
+        csv2 = ingest.save_upload(upload_dir, round2_sample_csv.filename, round2_sample_csv.file)
+        xw = ingest.save_upload(upload_dir, crosswalk_csv.filename, crosswalk_csv.file)
+        try:
+            result = weights.generate(csv1, csv2, xw, n_reps, seed_value, job)
+        except weights.WeightGenerationError as exc:
+            shutil.rmtree(job.job_dir, ignore_errors=True)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            # Never leave a half-written job directory behind on hard failures.
+            shutil.rmtree(job.job_dir, ignore_errors=True)
+            raise
+    finally:
+        ingest.remove_upload_dir(upload_dir)
+
+    weights.prune_old_jobs()
+    return JSONResponse(
+        {
+            "ok": True,
+            **result,
+            "download_url": f"/api/weight-jobs/{result['job_id']}/download",
+        }
+    )
+
+
+@app.get("/api/weight-jobs/{job_id}/download")
+def download_weight_job(job_id: str) -> FileResponse:
+    # Job ids are server-generated hex tokens; never interpolate user input
+    # into a path beyond an exact-name lookup inside the jobs directory.
+    if not job_id or not all(c in "0123456789abcdef" for c in job_id):
+        raise HTTPException(status_code=422, detail="任务号不合法")
+    zip_path = db._data_dir() / "jobs" / job_id / "paired_replicate_weights.zip"
+    if not zip_path.is_file():
+        raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新生成")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename="paired_replicate_weights.zip",
+    )
 
 
 @app.get("/api/districts")
